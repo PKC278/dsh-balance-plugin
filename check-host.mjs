@@ -3,7 +3,7 @@
  *
  * A throwaway HTTP server stands in for the DeepSeek platform, so the whole
  * privileged path is exercised: provider gating, credential resolution, the
- * balance request, and the response shaping the row consumes.
+* balance request, and the response shaping the card consumes.
  */
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
@@ -30,7 +30,8 @@ await new Promise((resolve) => platform.listen(0, "127.0.0.1", resolve));
 const baseUrl = `http://127.0.0.1:${String(platform.address().port)}`;
 
 let route;
-let injected;
+/** Verdict Connection would return for the next request, or undefined to admit it. */
+let rejection;
 const webCtx = {
 	webServer: {
 		register(spec) {
@@ -38,14 +39,12 @@ const webCtx = {
 			return () => {};
 		}
 	},
-	effect: (fn) => fn(),
-	on: (name, listener) => {
-		assert.equal(name, "webserver/index-inject");
-		const table = [];
-		listener(table);
-		injected = table[0];
+	connection: {
+		requestRejection() {
+			return rejection;
+		}
 	},
-	off: () => {}
+	effect: (fn) => fn()
 };
 
 const contexts = {
@@ -64,21 +63,18 @@ const contexts = {
 apply({
 	get: (name) => contexts[name],
 	inject: (names, callback) => {
-		if (names.includes("webServer")) callback(webCtx);
+		if (names.includes("webServer") && names.includes("connection")) callback(webCtx);
 	},
 	logger: { warn: () => {} }
 }, { baseUrl });
 
+assert.equal(route.kind, "exact", "the route owns its path rather than sharing the /api prefix");
 assert.equal(route.path, "/api/dsh-balance");
-assert.equal(injected.name, "__DSH_BALANCE__");
-assert.equal(injected.value.endpoint, "/api/dsh-balance");
-assert.equal(typeof injected.value.token, "string");
-const token = injected.value.token;
 
 function request(body, headers = {}) {
 	return {
 		method: "POST",
-		headers: { "x-dsh-balance-token": token, ...headers },
+		headers,
 		async *[Symbol.asyncIterator]() {
 			yield Buffer.from(JSON.stringify(body));
 		}
@@ -124,9 +120,22 @@ const unsupported = await call({ provider: "openai" });
 assert.equal(unsupported.body.kind, "unsupported");
 assert.equal(unsupported.body.provider, "openai");
 
-const forbidden = await call({ provider: "deepseek-official" }, { "x-dsh-balance-token": "wrong" });
-assert.equal(forbidden.status, 403);
-assert.equal(forbidden.body.kind, "forbidden");
+// Connection owns the Host/Origin fence and browser authentication; the route
+// only forwards its verdict, so no caller needs a credential of its own.
+rejection = 401;
+const unauthenticated = await call({ provider: "deepseek-official" });
+assert.equal(unauthenticated.status, 401);
+assert.equal(unauthenticated.body.kind, "unauthorized");
+rejection = 403;
+const untrustedCaller = await call({ provider: "deepseek-official" });
+assert.equal(untrustedCaller.status, 403);
+assert.equal(untrustedCaller.body.kind, "forbidden");
+rejection = undefined;
+
+const wrongMethod = response();
+await route.handler({ method: "GET", headers: {} }, wrongMethod);
+assert.equal(wrongMethod.status, 405);
+assert.equal(wrongMethod.body.kind, "method-not-allowed");
 
 const badBody = await call("not an object");
 assert.equal(badBody.status, 400);
@@ -165,16 +174,15 @@ assert.equal(seen.length, platformCallsAfterFirstReads + 1, "a status query neve
 // to a missing-credential answer instead of attempting a request.
 const withoutCredentials = [];
 apply({
-	get: (name) => name === "webServer" ? webCtx : undefined,
+	get: (name) => name === "webServer" || name === "connection" ? webCtx : undefined,
 	inject: (names, callback) => {
-		if (names.includes("webServer")) callback(webCtx);
+		if (names.includes("webServer") && names.includes("connection")) callback(webCtx);
 	},
 	logger: { warn: () => {} }
 }, { baseUrl });
 withoutCredentials.push(route);
-assert.notEqual(injected.value.token, token, "each composition mints its own access token");
 const missing = response();
-await withoutCredentials[0].handler(request({ provider: "deepseek-official" }, { "x-dsh-balance-token": injected.value.token }), missing);
+await withoutCredentials[0].handler(request({ provider: "deepseek-official" }), missing);
 assert.equal(missing.body.kind, "missing-credential");
 assert.equal(missing.body.source, "DeepSeek API Key");
 

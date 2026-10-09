@@ -1,0 +1,10 @@
+# The dsh-balance bundle patch: one insert over the empty profile root, so the
+# package is installed and removed as a whole instead of by hand-editing a
+# profile's cordis.patch.yml.
+#
+# Later bundle layers and the user's profile layer address this row by id, with
+# the last write winning. `baseUrl` and `cacheTtlMs` keep their plugin defaults
+# unless a later layer overrides them.
+- insert:
+    - id: ui-balance
+      name: '@pkc278/dsh-balance'

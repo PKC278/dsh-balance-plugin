@@ -1,7 +1,7 @@
 {
   "name": "@pkc278/dsh-balance",
-  "version": "0.1.0",
-  "description": "DSH client plugin: DeepSeek balance row in the conversation composer dock",
+  "version": "0.2.0",
+  "description": "DSH client plugin: DeepSeek balance card in the conversation composer dock",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -11,11 +11,16 @@
     "./client": {
       "default": "./lib/client.js"
     },
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-model-selection"
       ],
       "platform": "web"
@@ -23,6 +28,8 @@
   },
   "files": [
     "lib",
+    "locale/*.json",
+    "cordis.patch.yml",
     "README.md"
   ],
   "keywords": [

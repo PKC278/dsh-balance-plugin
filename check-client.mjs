@@ -100,7 +100,7 @@ const moduleExports = registration.factory((specifier) => {
 	throw new Error(`unexpected factory require: ${specifier}`);
 });
 assert.equal(typeof moduleExports.apply, "function");
-assert.deepEqual(moduleExports.inject, ["slots", "modelDirectories", "sessions"]);
+assert.deepEqual(moduleExports.inject, ["slots", "locale", "modelDirectories", "sessions"]);
 
 const snapshot = { current: { provider: "deepseek-official", model: "deepseek-flash" } };
 let captured;
@@ -119,8 +119,36 @@ const sessionsService = {
 		}
 	}
 };
+/**
+ * Stand-in for the locale service. It keeps whatever the plugin registers and
+ * binds a translator that reads the active language, so the copy assertions
+ * below exercise the real dictionary instead of a fixed string.
+ */
+const dictionaries = new Map();
+const effectDisposers = [];
+let activeLocale = "zh";
+const localeService = {
+	register(ns, dicts) {
+		dictionaries.set(ns, dicts);
+		return () => {
+			dictionaries.delete(ns);
+		};
+	},
+	bind: (ns) => (key, params) => {
+		const dictionary = dictionaries.get(ns);
+		assert.ok(dictionary !== undefined, `no dictionary registered for ${ns}`);
+		const template = dictionary[activeLocale]?.[key] ?? dictionary.en?.[key];
+		assert.equal(typeof template, "string", `no copy for ${ns}.${key}`);
+		if (params === undefined) return template;
+		return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
+	}
+};
 moduleExports.apply({
 	get: (name) => name === "sessions" ? sessionsService : undefined,
+	locale: localeService,
+	effect(callback) {
+		effectDisposers.push(callback());
+	},
 	modelDirectories: {
 		directoryFor(sessionId) {
 			assert.equal(sessionId, "session-1");
@@ -141,7 +169,10 @@ moduleExports.apply({
 			assert.equal(options.name, "conversation.composer.dock");
 			assert.equal(options.id, "balance");
 			assert.equal(options.order, 10);
-			assert.equal(typeof options.label, "string");
+			assert.equal(options.locale, moduleExports.__internals.LOCALE_NS, "the entry declares the namespace its translator binds to");
+			// A thunk, not a string: the slot reads it at render time so the label
+			// follows the active language.
+			assert.equal(typeof options.label, "function");
 			captured = { options, component };
 			return () => {};
 		}
@@ -149,6 +180,7 @@ moduleExports.apply({
 });
 
 assert.equal(typeof captured.options.inject, "function");
+assert.equal(effectDisposers.length, 1, "the dictionary registration belongs to the plugin fiber");
 const injected = captured.options.inject("session-1");
 assert.equal(loadCalls, 1, "the session directory is asked to load");
 assert.deepEqual(injected.readSelection(), { provider: "deepseek-official", model: "deepseek-flash" });
@@ -172,9 +204,9 @@ listSnapshot = { byId: {}, phase: "ready" };
 listListener();
 assert.equal(turnEnds.length, 1, "a vanished session row reports nothing");
 disposeTurnEnd();
-assert.equal(listListener, undefined, "the subscription is disposed with the row");
+assert.equal(listListener, undefined, "the subscription is disposed with the card");
 
-const props = { boot: injected.boot, readSelection: injected.readSelection, subscribeSelection: injected.subscribeSelection, observeTurnEnd: injected.observeTurnEnd };
+const props = { readSelection: injected.readSelection, subscribeSelection: injected.subscribeSelection, observeTurnEnd: injected.observeTurnEnd, t: localeService.bind(moduleExports.__internals.LOCALE_NS) };
 const draw = () => {
 	reactStub.cursor = 0;
 	// A state block must exist before any setter runs, exactly as in React.
@@ -182,13 +214,13 @@ const draw = () => {
 	return captured.component(props);
 };
 const tree = draw();
-assert.equal(tree.type, "button", "the row is a refresh control");
+assert.equal(tree.type, "button", "the card is a refresh control");
 assert.equal(tree.props.className, "dsh_balance_dock");
-assert.equal(typeof tree.props.onClick, "function", "clicking the row refreshes");
-assert.equal(tree.props["data-state"], "loading", "before the first answer the row renders its placeholder in the loading state");
+assert.equal(typeof tree.props.onClick, "function", "clicking the card refreshes");
+assert.equal(tree.props["data-state"], "loading", "before the first answer the card renders its placeholder in the loading state");
 const visible = (element) => element.children.filter((child) => child !== null && child !== undefined && child !== false);
-assert.equal(visible(tree).length, 4, "an idle row carries the glyph, the label, the loading ring, and the value");
-assert.equal(visible(tree)[0].type, moduleExports.__internals.BalanceIcon, "the card glyph leads the row");
+assert.equal(visible(tree).length, 4, "an idle card carries the glyph, the label, the loading ring, and the value");
+assert.equal(visible(tree)[0].type, moduleExports.__internals.BalanceIcon, "the credit-card glyph leads the card");
 assert.equal(visible(tree)[1].props.className, "dsh_balance_label");
 assert.equal(visible(tree)[1].children[0], "\u4f59\u989d ", "the label keeps one space before the amount");
 assert.equal(visible(tree)[2].type, moduleExports.__internals.BalanceRing, "an unanswered read shows the loading ring instead of a dash");
@@ -201,12 +233,26 @@ assert.equal(visible(tree)[3].children[0], "--", "the dash stays in the value sl
 const icon = moduleExports.__internals.BalanceIcon();
 assert.equal(icon.type, "svg");
 assert.equal(icon.props.viewBox, "0 0 24 24");
-assert.equal(icon.props.stroke, "currentColor", "the glyph follows the row colour");
+assert.equal(icon.props.stroke, "currentColor", "the glyph follows the card colour");
 assert.equal(icon.props.width, 14);
 assert.equal(icon.props.height, 14);
 assert.equal(icon.children.length, 3, "the glyph keeps the card rectangle, the stripe, and the mark");
-assert.equal(tree.props["data-refreshing"], undefined, "an idle row carries no in-flight marker");
+assert.equal(tree.props["data-refreshing"], undefined, "an idle card carries no in-flight marker");
 assert.equal(tree.props["aria-busy"], undefined);
+
+// Copy comes from the card's own dictionary, and the registration names the
+// namespace so the framework seats the translator. A language switch must change
+// the rendered text, and both dictionaries must stay complete.
+const { LOCALE_NS, MESSAGES } = moduleExports.__internals;
+assert.deepEqual(Object.keys(MESSAGES.zh).sort(), Object.keys(MESSAGES.en).sort(), "both dictionaries carry the same keys");
+assert.equal(captured.options.label(), MESSAGES.zh.label, "the slot label follows the active language");
+activeLocale = "en";
+const englishTree = draw();
+assert.equal(visible(englishTree)[1].children[0], "Balance ", "the card label follows the active language");
+assert.equal(englishTree.props.title, "Click to refresh the balance", "the tooltip follows the active language");
+activeLocale = "zh";
+assert.equal(draw().props.title, MESSAGES.zh.refresh, "switching back restores the Chinese copy");
+assert.equal(captured.options.label(), MESSAGES.zh.label, "the slot label follows the language back");
 
 // A local endpoint stands in for the host route. It answers both actions:
 // `status` reports the cache state, `read` returns the amount.
@@ -214,12 +260,15 @@ let answerBody = JSON.stringify({ kind: "ok", source: "DeepSeek API Key", isAvai
 let cacheFresh = false;
 let cachedBalance = "210.00";
 const bodies = [];
+/** Paths the card asked for, so the fixed same-origin route stays asserted. */
+const paths = [];
 const endpoint = createServer((request, response) => {
 	const chunks = [];
 	request.on("data", (chunk) => chunks.push(chunk));
 	request.on("end", () => {
 		const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
 		bodies.push(body);
+		paths.push(request.url);
 		response.writeHead(200, { "content-type": "application/json" });
 		if (body.action === "status") {
 			response.end(JSON.stringify(cacheFresh
@@ -231,7 +280,14 @@ const endpoint = createServer((request, response) => {
 	});
 });
 await new Promise((resolve) => endpoint.listen(0, "127.0.0.1", resolve));
-const endpointProps = { ...props, boot: { endpoint: `http://127.0.0.1:${String(endpoint.address().port)}/`, token: "test" } };
+// The card posts to a fixed same-origin path, so the harness stands in for the
+// page origin by forwarding that one path to the local server. A relative URL
+// has no base in Node, which is also why this is what makes the constant itself
+// testable rather than routed around by an injected endpoint.
+const origin = `http://127.0.0.1:${String(endpoint.address().port)}`;
+const pageFetch = globalThis.fetch;
+globalThis.fetch = (input, init) => pageFetch(typeof input === "string" && input.startsWith("/") ? origin + input : input, init);
+const endpointProps = props;
 let painted = null;
 const drawEndpoint = () => {
 	reactStub.cursor = 0;
@@ -258,15 +314,15 @@ const tick = async (ms) => {
 };
 
 /**
- * Start one row cycle the way the application does: render, run the effects,
+* Start one card cycle the way the application does: render, run the effects,
  * then wait until no in-flight marker is left.
  * @param reset - whether to begin from a blank state block.
- * @returns the settled row element.
+* @returns the settled card element.
  */
 /** Run the effects queued by the last render, as React would after committing. */
 const settleEffects = () => reactStub.effects.splice(0).map((effect) => effect()).filter((cleanup) => typeof cleanup === "function");
 
-/** Redraw until the row shows no in-flight marker. */
+/** Redraw until the card shows no in-flight marker. */
 const settleState = async () => {
 	let tree = await tick(150);
 	for (let attempt = 0; attempt < 40 && tree.props["data-refreshing"] !== undefined; attempt++) tree = await tick(20);
@@ -288,10 +344,10 @@ const runCycle = async (reset) => {
 	return { tree, cleanups };
 };
 
-// 0. A model route this row does not serve renders nothing at all, from the first
+// 0. A model route this card does not serve renders nothing at all, from the first
 //    render rather than after an effect.
-assert.equal(captured.component({ ...endpointProps, readSelection: () => ({ provider: "openai", model: "gpt-4" }) }), null, "a non-DeepSeek route renders no row");
-assert.equal(captured.component({ ...endpointProps, readSelection: () => undefined }), null, "a row without a selection renders nothing");
+assert.equal(captured.component({ ...endpointProps, readSelection: () => ({ provider: "openai", model: "gpt-4" }) }), null, "a non-DeepSeek route renders no card");
+assert.equal(captured.component({ ...endpointProps, readSelection: () => undefined }), null, "a card without a selection renders nothing");
 
 // 1. A first display with a stale cache: ask the cache, then pay for one read.
 bodies.length = 0;
@@ -299,9 +355,11 @@ const firstCycle = await runCycle(true);
 assert.deepEqual(actions(), ["status", "read(force=true)"], "a stale cache costs one freshness check and one forced read");
 assert.equal(firstCycle.tree.props["data-refreshing"], undefined);
 assert.equal(visible(firstCycle.tree)[2].children[0], "\u00a5217.42", "the read amount is painted");
-assert.equal(visible(firstCycle.tree).length, 3, "the settled row carries the glyph, the label, and the value");
+assert.equal(visible(firstCycle.tree).length, 3, "the settled card carries the glyph, the label, and the value");
+assert.equal(firstCycle.tree.props.title, "\u4f59\u989d\u6765\u6e90\uff1aDeepSeek API Key\uff0c\u70b9\u51fb\u5237\u65b0", "the settled tooltip names the source the answer came from");
+assert.deepEqual([...new Set(paths)], ["/api/dsh-balance"], "every request goes to the fixed same-origin route");
 
-// 1b. A later row for the same provider paints the remembered amount at once, so
+// 1b. A later card for the same provider paints the remembered amount at once, so
 //     switching conversations cannot flash a placeholder.
 reactStub.cursor = 0;
 stage = [];
@@ -311,7 +369,7 @@ reactStub.refs = {};
 const remembered = drawEndpoint();
 // The first paint is the whole point of this check; do not start its cycle.
 reactStub.effects.splice(0);
-assert.equal(remembered.props["data-state"], "ok", "a new row starts from the remembered amount");
+assert.equal(remembered.props["data-state"], "ok", "a new card starts from the remembered amount");
 assert.equal(visible(remembered)[2].children[0], "\u00a5217.42", "the remembered amount is painted immediately");
 assert.equal(remembered.props["data-refreshing"], undefined);
 
@@ -369,13 +427,14 @@ assert.equal(currentSelection({ current: null }), undefined);
 assert.equal(currentSelection(undefined), undefined);
 assert.equal(currentSelection({ current: { model: "deepseek-chat" } }), undefined);
 
-// The row rule must stay a flex container: its gap and vertical centring only
-// apply there, and losing `display: flex` silently turns the row into two lines.
+// The `.dsh_balance_dock` rule must stay a flex container: its gap and vertical
+// centring only apply there, and losing `display: flex` silently turns the card
+// into two lines.
 const stylesheet = documentCreated.join("");
-const rowRule = stylesheet.slice(stylesheet.indexOf(".dsh_balance_dock{"), stylesheet.indexOf("}", stylesheet.indexOf(".dsh_balance_dock{")) + 1);
+const cardRule = stylesheet.slice(stylesheet.indexOf(".dsh_balance_dock{"), stylesheet.indexOf("}", stylesheet.indexOf(".dsh_balance_dock{")) + 1);
 assert.ok(stylesheet.includes("svg.dsh_balance_icon{"), "the glyph is sized by the stylesheet");
 for (const declaration of ["display:flex", "align-items:center", "gap:6px", "flex-wrap:nowrap"]) {
-	assert.ok(rowRule.includes(declaration), `the row rule keeps ${declaration}`);
+	assert.ok(cardRule.includes(declaration), `the .dsh_balance_dock rule keeps ${declaration}`);
 }
 
 console.log("balance client contract checks passed");

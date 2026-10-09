@@ -1,27 +1,27 @@
 # dsh-balance-plugin
 
-DSH 客户端插件：在输入框下方的统计行里显示当前模型提供商对应的 DeepSeek 账户余额。
+DSH 客户端插件：在输入框下方的统计行显示当前模型提供商对应的 DeepSeek 账户余额。
 
 ## 功能
 
-- 位置：会话底栏（`conversation.composer.dock`）的第三项，位于自带的两项统计之后、上下文占用环之前
-- 内容：卡片图标 +「余额 」+ 金额，随主题使用三级文本色
-- 点击整行可强制刷新；请求进行中，金额之后显示旋转指示环
-- 仅查询两个 DeepSeek 路由：`deepseek-official`（凭据 `DEEPSEEK_API_KEY`，请求头 `Authorization: Bearer`）与 `deepseek-account`（账户令牌，请求头 `x-dsh-auth-token`）。其他提供商既不显示该行，也不访问其凭据
+- 位置：会话底栏（`conversation.composer.dock`）的第三项，位于内置的两项统计之后、上下文占用之前
+- 内容：卡片图标、「余额」与金额，随主题使用三级文本色
+- 点击余额卡片可强制刷新；请求进行中，金额之后显示旋转指示环
+- 仅查询两个 DeepSeek 提供商：`deepseek-official`（凭据 `DEEPSEEK_API_KEY`，请求头 `Authorization: Bearer`）与 `deepseek-account`（账户令牌，请求头 `x-dsh-auth-token`）。其他提供商既不显示余额卡片，也不访问其凭据
 - 每轮对话结束时自动请求一次
 
 ## 请求与缓存
 
-宿主侧以「提供方 + 实际发送的凭据」的 SHA-256 指纹为键维护缓存，有效期 5 分钟：
+宿主侧以「提供商 + 实际发送的凭据」的 SHA-256 指纹为键维护缓存，有效期 5 分钟：
 
 | 触发 | 行为 |
 | --- | --- |
 | 点击刷新 | 强制请求平台，并重新开始计时 |
 | 本轮完成 | 强制请求平台，并重新开始计时 |
 | 新开对话首次显示 | 先读取缓存；仍在有效期内则直接复用，过期才请求平台 |
-| 静默 5 分钟 | 定时器到点后读取缓存，已过期才请求平台；仅限当前对话的提供方 |
+| 静默 5 分钟 | 定时器到点后读取缓存，已过期才请求平台；仅限当前对话的提供商 |
 
-同一凭据在有效期内的多个会话共享结果。客户端另按提供方在页面生命周期内保留最近一次金额，因此切换对话时不会出现占位状态。
+同一凭据在有效期内的多个会话共享结果。客户端另按提供商在页面生命周期内保留最近一次金额，因此切换对话时不会出现占位状态。
 
 ## 状态表现
 
@@ -29,43 +29,18 @@ DSH 客户端插件：在输入框下方的统计行里显示当前模型提供�
 | --- | --- |
 | 请求进行中 | 金额位置显示旋转指示环，不显示 `--` |
 | 成功 | `¥213.12` 形式的金额 |
-| 请求失败、凭据缺失、账户不可用 | 弱化的 `--`，由行内文字色混出，明暗主题下均清晰可读 |
-| 非 DeepSeek 提供商 | 整行不渲染 |
+| 请求失败、凭据缺失、账户不可用 | 淡化的 `--`，明暗主题下均清晰可读 |
+| 非 DeepSeek 提供商 | 余额卡片不渲染 |
+
+## 多语言
+
+行内文案与插件页卡片的标题、描述均随界面语言切换，当前提供 `zh` 与 `en`。行内文案位于 `lib/client.js` 的 `MESSAGES`，卡片元信息位于 `locale/<语言>.json`。
 
 ## 安装
 
-包名 `@pkc278/dsh-balance`。可从 npm 安装，也可链接本地目录；两种方式均包含两步：使 profile 能够解析该包名，并将条目插入 profile 的 patch 层。
+在侧栏**插件**页选择**添加插件**，从 npm 安装填入 `@pkc278/dsh-balance`，本地开发填入本目录的绝对路径，随后选择**立即启用**。等效命令为 `dsh plugin --profile desktop add @pkc278/dsh-balance`。
 
-### 从 npm 安装
-
-```bash
-dsh plugin --profile desktop add @pkc278/dsh-balance
-
-cat >> ~/.dsh/profiles/desktop/cordis.patch.yml <<'YAML'
-- insert:
-    - id: ui-balance
-      name: "@pkc278/dsh-balance"
-YAML
-```
-
-### 从本地目录链接（开发用）
-
-```bash
-# 1) 使 profile 解析到本地目录
-mkdir -p ~/.dsh/profiles/desktop/node_modules/@pkc278
-ln -sfn "$(pwd)" ~/.dsh/profiles/desktop/node_modules/@pkc278/dsh-balance
-
-# 2) 插入 patch 条目
-cat >> ~/.dsh/profiles/desktop/cordis.patch.yml <<'YAML'
-- insert:
-    - id: ui-balance
-      name: "@pkc278/dsh-balance"
-YAML
-```
-
-之后需**完全退出并重新打开** DSH 桌面应用。仅关闭窗口不会生效，客户端插件在应用启动时一次性组装。
-
-卸载：删除 patch 条目与 `node_modules/@pkc278/dsh-balance`，随后重新启动应用。
+启用后即可用，无需重启应用。
 
 ## 开发与自检
 
@@ -95,9 +70,9 @@ node check-host.mjs     # 宿主路由：凭据解析、缓存命中、强制刷
 
 ```
 lib/index.js    宿主侧：凭据解析、缓存、余额接口请求、同源路由 /api/dsh-balance
-lib/client.js   客户端：槽位注册、状态渲染、按提供方请求与保留、旋转指示环
+lib/client.js   客户端：槽位注册、状态渲染、按提供商请求与保留、旋转指示环
 check-client.mjs 客户端契约检查
 check-host.mjs   宿主契约检查
 ```
 
-宿主侧路由以每次启动随机生成的令牌校验调用方；页面通过启动注入获得端点与令牌。凭据仅在宿主进程内使用，不进入页面。
+宿主侧路由沿用 Connection 的 Host/Origin 围栏与浏览器会话认证，因此页面不需要任何启动注入即可调用，宿主中途安装也能立即生效。凭据仅在宿主进程内使用，不进入页面。
