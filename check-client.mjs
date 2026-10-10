@@ -254,11 +254,12 @@ activeLocale = "zh";
 assert.equal(draw().props.title, MESSAGES.zh.refresh, "switching back restores the Chinese copy");
 assert.equal(captured.options.label(), MESSAGES.zh.label, "the slot label follows the language back");
 
-// A local endpoint stands in for the host route. It answers both actions:
-// `status` reports the cache state, `read` returns the amount.
-let answerBody = JSON.stringify({ kind: "ok", source: "DeepSeek API Key", isAvailable: true, wallets: [{ currency: "CNY", balance: "217.42" }] });
-let cacheFresh = false;
-let cachedBalance = "210.00";
+// A local endpoint stands in for the host route. Every answer carries the cache
+// window and the age of the entry it came from, which is what the card schedules
+// its next automatic read from.
+let expiresInMs = 600000;
+/** Non-null makes the endpoint answer with a host failure instead of an amount. */
+let failure = null;
 const bodies = [];
 /** Paths the card asked for, so the fixed same-origin route stays asserted. */
 const paths = [];
@@ -270,13 +271,14 @@ const endpoint = createServer((request, response) => {
 		bodies.push(body);
 		paths.push(request.url);
 		response.writeHead(200, { "content-type": "application/json" });
-		if (body.action === "status") {
-			response.end(JSON.stringify(cacheFresh
-				? { kind: "ok", source: "DeepSeek API Key", fresh: true, ageMs: 1000, isAvailable: true, wallets: [{ currency: "CNY", balance: cachedBalance }] }
-				: { kind: "ok", source: "DeepSeek API Key", fresh: false }));
-			return;
-		}
-		setTimeout(() => response.end(answerBody), 60);
+		setTimeout(() => response.end(JSON.stringify(failure ?? {
+			kind: "ok",
+			source: "DeepSeek API Key",
+			isAvailable: true,
+			cached: false,
+			expiresInMs,
+			wallets: [{ currency: "CNY", balance: "217.42" }]
+		})), 60);
 	});
 });
 await new Promise((resolve) => endpoint.listen(0, "127.0.0.1", resolve));
@@ -301,13 +303,7 @@ notify = () => {
 		drawEndpoint();
 	}
 };
-notify = () => {
-	if (pendingSet) {
-		pendingSet = false;
-		drawEndpoint();
-	}
-};
-const actions = () => bodies.map((body) => (body.action === "status" ? "status" : `read(force=${String(body.force)})`));
+const actions = () => bodies.map((body) => `read(force=${String(body.force)})`);
 const tick = async (ms) => {
 	await new Promise((resolve) => setTimeout(resolve, ms));
 	return drawEndpoint();
@@ -352,7 +348,7 @@ assert.equal(captured.component({ ...endpointProps, readSelection: () => undefin
 // 1. A first display with a stale cache: ask the cache, then pay for one read.
 bodies.length = 0;
 const firstCycle = await runCycle(true);
-assert.deepEqual(actions(), ["status", "read(force=true)"], "a stale cache costs one freshness check and one forced read");
+assert.deepEqual(actions(), ["read(force=false)"], "the first display of a session asks plainly, so the host may reuse an entry");
 assert.equal(firstCycle.tree.props["data-refreshing"], undefined);
 assert.equal(visible(firstCycle.tree)[2].children[0], "\u00a5217.42", "the read amount is painted");
 assert.equal(visible(firstCycle.tree).length, 3, "the settled card carries the glyph, the label, and the value");
@@ -384,31 +380,60 @@ drawEndpoint();
 const clickEffects = settleEffects();
 const clicked = await settleState();
 assert.equal(clicked.props["data-refreshing"], undefined, "the marker clears once the click read settles");
-const forcedRead = bodies.find((body) => body.action !== "status");
+const forcedRead = bodies.find((body) => body.force === true);
 assert.ok(forcedRead !== undefined, "a click forces a read");
 assert.equal(forcedRead.force, true, "the click read asks the platform for fresh data");
 assert.equal(forcedRead.provider, "deepseek-official", "the read names the provider of its own conversation");
 for (const cleanup of clickEffects) cleanup();
 
-// 3. A first display whose cache is still fresh costs no platform read at all.
-cacheFresh = true;
-cachedBalance = "211.11";
+// 3. The next automatic read is scheduled from the lifetime the host reported, so
+//    a partly spent entry is re-read after its remainder rather than after a whole
+//    window of the card's own.
+expiresInMs = 700;
 bodies.length = 0;
-const reused = (await runCycle(true)).tree;
-assert.deepEqual(actions(), ["status"], "a fresh cache is reused without a read");
-assert.equal(visible(reused)[2].children[0], "\u00a5211.11", "the reused amount is painted");
-assert.equal(reused.props["data-refreshing"], undefined, "a reused amount never raises the marker");
-
-// 4. The quiet-period timer asks the cache, and only reads once it has expired.
-cacheFresh = false;
-bodies.length = 0;
-const timed = (await runCycle(true)).tree;
-assert.deepEqual(actions(), ["status", "read(force=true)"], "an expired cache on the timer costs one forced read");
-assert.equal(timed.props["data-refreshing"], undefined, "the timer never raises the marker");
+const timed = await runCycle(true);
+assert.deepEqual(actions(), ["read(force=false)"], "the automatic path never forces a read");
+await tick(200);
+assert.equal(bodies.length, 1, "the card waits out the remainder of the reported window");
+for (let attempt = 0; attempt < 40 && bodies.length < 2; attempt++) await tick(50);
+assert.deepEqual(actions(), ["read(force=false)", "read(force=false)"], "the card re-reads once the reported window runs out");
+assert.equal(timed.tree.props["data-refreshing"], undefined, "an automatic re-read never raises the marker");
 for (const cleanup of firstCycle.cleanups) cleanup();
+
+// 4. The end of a turn forces a read: the cached amount predates the spending that
+//    turn has just settled.
+expiresInMs = 600000;
+// A fresh cycle re-registers the turn-end subscription this card owns, which the
+// cleanup of the first cycle has already disposed.
+const turnEndCycle = await runCycle(true);
+assert.equal(typeof listListener, "function", "the card subscribes to the session's turn-end edges");
+bodies.length = 0;
+listSnapshot = { byId: { "session-1": { running: true } }, phase: "ready" };
+listListener();
+listSnapshot = { byId: { "session-1": { running: false } }, phase: "ready" };
+listListener();
+settleEffects();
+const afterTurnEnd = await settleState();
+assert.equal(bodies.length, 1, "a finished turn costs exactly one read");
+assert.equal(bodies[0].force, true, "the read a finished turn triggers is forced");
+assert.equal(afterTurnEnd.props["data-refreshing"], undefined, "the marker clears once the turn-end read settles");
+for (const cleanup of turnEndCycle.cleanups) cleanup();
+
+// 5. A credential the host cannot resolve settles the card into its error state,
+//    and the card does not chase it with an immediate re-read.
+failure = { kind: "missing-credential", provider: "deepseek-official", source: "DeepSeek API Key" };
+expiresInMs = 600000;
+bodies.length = 0;
+const missing = await runCycle(true);
+assert.deepEqual(actions(), ["read(force=false)"], "a missing credential is asked for once");
+assert.equal(missing.tree.props["data-state"], "error", "a missing credential settles into the error state");
+await tick(400);
+assert.equal(bodies.length, 1, "a missing credential is not re-read immediately");
+failure = null;
+
 await new Promise((resolve) => endpoint.close(resolve));
 
-const { formatAmount, symbolOf, isDeepSeekProvider, currentSelection } = moduleExports.__internals;
+const { formatAmount, symbolOf, isDeepSeekProvider, currentSelection, waitForExpiry } = moduleExports.__internals;
 
 assert.equal(isDeepSeekProvider("deepseek-official"), true);
 assert.equal(isDeepSeekProvider("deepseek-account"), true);
@@ -421,6 +446,11 @@ assert.equal(formatAmount("0"), "0.00");
 assert.equal(formatAmount("not a number"), null);
 assert.equal(symbolOf("CNY"), "\u00a5");
 assert.equal(symbolOf("USD"), "$");
+
+assert.equal(waitForExpiry({ expiresInMs: 300000 }), 300000);
+assert.equal(waitForExpiry({ expiresInMs: 120000 }), 120000, "a partly spent window is scheduled from its remainder");
+assert.equal(waitForExpiry({ expiresInMs: 10 }), 10, "the page schedules what the host reported, because the host floors the window");
+assert.equal(waitForExpiry({}), 300000, "an answer without a lifetime falls back to the default");
 
 assert.deepEqual(currentSelection({ current: { provider: "deepseek-account", model: "deepseek-chat" } }), { provider: "deepseek-account", model: "deepseek-chat" });
 assert.equal(currentSelection({ current: null }), undefined);

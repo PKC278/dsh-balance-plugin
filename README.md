@@ -7,19 +7,23 @@ DSH 客户端插件：在输入框下方的统计行显示当前模型提供商�
 - 位置：会话底栏（`conversation.composer.dock`）的第三项，位于内置的两项统计之后、上下文占用之前
 - 内容：卡片图标、「余额」与金额，随主题使用三级文本色
 - 点击余额卡片可强制刷新；请求进行中，金额之后显示旋转指示环
-- 仅查询两个 DeepSeek 提供商：`deepseek-official`（凭据 `DEEPSEEK_API_KEY`，请求头 `Authorization: Bearer`）与 `deepseek-account`（账户令牌，请求头 `x-dsh-auth-token`）。其他提供商既不显示余额卡片，也不访问其凭据
+- 仅查询两个 DeepSeek 提供商：`deepseek-official`（凭据 `DEEPSEEK_API_KEY`，请求头 `Authorization: Bearer`）与 `deepseek-account`（账户令牌，请求头 `x-dsh-auth-token`）。其他提供商既不显示余额卡片，也不访问其凭据。余额接口地址取自该提供商端点配置的 origin
 - 每轮对话结束时自动请求一次
 
 ## 请求与缓存
 
-宿主侧以「提供商 + 实际发送的凭据」的 SHA-256 指纹为键维护缓存，有效期 5 分钟：
+宿主侧以「提供商 + 端点 origin + 实际发送的凭据」的 SHA-256 指纹为键维护缓存，有效期默认 5 分钟，并且是缓存状态的唯一判断方：页面只声明一次请求是否允许复用。
 
-| 触发 | 行为 |
-| --- | --- |
-| 点击刷新 | 强制请求平台，并重新开始计时 |
-| 本轮完成 | 强制请求平台，并重新开始计时 |
-| 新开对话首次显示 | 先读取缓存；仍在有效期内则直接复用，过期才请求平台 |
-| 静默 5 分钟 | 定时器到点后读取缓存，已过期才请求平台；仅限当前对话的提供商 |
+| 触发 | 请求 | 行为 |
+| --- | --- | --- |
+| 新开对话首次显示 | 普通 | 缓存未到期直接返回，已到期或缺失才请求平台 |
+| 静默到期 | 普通 | 唤醒时刻由上次答案中的剩余可用时长决定 |
+| 点击刷新 | 强制 | 忽略缓存，请求平台 |
+| 本轮完成 | 强制 | 忽略缓存，请求平台 |
+
+端点按提供商自身解析该端点的顺序取值，即显式 `baseURL`、其次 `$DEEPSEEK_BASE_URL`、最后官方根地址，并且只取其 origin：余额接口位于平台根下，而提供商端点带有协议前缀。因此把 DeepSeek 指向另一处兼容 Messages 的部署时，余额也从该部署读取，账户令牌按同一 origin 申请。可查询的提供商仍只有 `deepseek-official` 与 `deepseek-account` 两条，其他提供商既不解析端点也不访问凭据。每个提供商的解析结果只保留一份，在设置写入使配置文档变更时失效；直接编辑 profile 文件而不经设置写入时，需重载插件才会跟随。
+
+每个成功答案都携带该条目的剩余可用时长 `expiresInMs`，页面据此直接安排下一次自动请求，该数值本身不再由页面夹取。缓存窗口以 1 秒为下限，因此调整 `cacheTtlMs` 会同时改变页面的重读节奏。同一凭据在同一时刻到达的请求合并为一次平台调用，因此同时打开的多个页面不会各付一次查询。点击与本轮完成之所以强制，是因为这两次触发都跟随缓存金额无法反映的消耗。
 
 同一凭据在有效期内的多个会话共享结果。客户端另按提供商在页面生命周期内保留最近一次金额，因此切换对话时不会出现占位状态。
 
@@ -47,8 +51,8 @@ DSH 客户端插件：在输入框下方的统计行显示当前模型提供商�
 不依赖任何第三方包，可直接使用 Node 执行契约检查：
 
 ```bash
-node check-client.mjs   # 注册形态、槽位、状态、请求载荷、纯函数
-node check-host.mjs     # 宿主路由：凭据解析、缓存命中、强制刷新、错误分支
+node check-client.mjs   # 注册形态、槽位、状态、请求载荷、到期排程、回合结束触发、纯函数
+node check-host.mjs     # 宿主路由：凭据解析、缓存命中、强制刷新、并发合并、错误分支
 ```
 
 两个脚本均以本地临时 HTTP 端点替代平台接口，不访问网络，也不使用真实凭据。
@@ -59,20 +63,20 @@ node check-host.mjs     # 宿主路由：凭据解析、缓存命中、强制刷
 
 | 项 | 位置 | 当前值 |
 | --- | --- | --- |
-| 轮询/静默窗口 | `lib/client.js` `REFRESH_INTERVAL_MS` | 300000（5 分钟） |
-| 缓存有效期 | `lib/index.js` `DEFAULT_CACHE_TTL_MS` | 300000；可用 profile 条目的 `config.cacheTtlMs` 覆盖 |
+| 缓存有效期 | `lib/index.js` `DEFAULT_CACHE_TTL_MS` | 300000；可用 profile 条目的 `config.cacheTtlMs` 覆盖，页面按答案中的 `expiresInMs` 安排下一次重读 |
+| 缓存有效期下限 | `lib/index.js` `MIN_CACHE_TTL_MS` | 1000；配得更短的窗口按 1 秒处理 |
+| 答案无有效期时的回退 | `lib/client.js` `DEFAULT_CACHE_TTL_MS` | 300000 |
 | 失败重试间隔 | `lib/client.js` `RETRY_INTERVAL_MS` | 15000 |
 | 点击冷却 | `lib/client.js` `MIN_CLICK_INTERVAL_MS` | 1000 |
 | 点击反馈最短时长 | `lib/client.js` `FEEDBACK_FLOOR_MS` | 300 |
-| 余额接口根地址 | `lib/index.js` `DEFAULT_BASE_URL` | `https://api.deepseek.com`，可用 `config.baseUrl` 覆盖 |
 
 ## 结构
 
 ```
-lib/index.js    宿主侧：凭据解析、缓存、余额接口请求、同源路由 /api/dsh-balance
+lib/index.js    宿主侧：凭据解析、端点解析、缓存、并发合并、余额接口请求、同源路由 /api/dsh-balance
 lib/client.js   客户端：槽位注册、状态渲染、按提供商请求与保留、旋转指示环
 check-client.mjs 客户端契约检查
 check-host.mjs   宿主契约检查
 ```
 
-宿主侧路由沿用 Connection 的 Host/Origin 围栏与浏览器会话认证，因此页面不需要任何启动注入即可调用，宿主中途安装也能立即生效。凭据仅在宿主进程内使用，不进入页面。
+宿主侧路由沿用 Connection 的 Host/Origin 围栏与浏览器会话认证，因此页面不需要任何启动注入即可调用，宿主中途安装也能立即生效。凭据、缓存判断与上游请求都只发生在宿主进程内，页面只提交普通或强制两种请求。

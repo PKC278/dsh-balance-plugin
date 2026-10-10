@@ -1,6 +1,6 @@
 {
   "name": "@pkc278/dsh-balance",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "DSH client plugin: DeepSeek balance card in the conversation composer dock",
   "type": "module",
   "main": "lib/index.js",

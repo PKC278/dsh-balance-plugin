@@ -3,8 +3,9 @@
 # profile's cordis.patch.yml.
 #
 # Later bundle layers and the user's profile layer address this row by id, with
-# the last write winning. `baseUrl` and `cacheTtlMs` keep their plugin defaults
-# unless a later layer overrides them.
+# the last write winning. `cacheTtlMs` is the only setting this row carries: it
+# keeps its plugin default unless a later layer overrides it, and it also sets
+# when the page re-reads, because every answer reports the window it came from.
 - insert:
     - id: ui-balance
       name: '@pkc278/dsh-balance'
